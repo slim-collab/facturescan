@@ -171,8 +171,8 @@
       if (!societe) {
         const legalForms = 'SARL|SAS|SASU|SA|EURL|SCI|SELARL|SELAS|SCOP|GIE|SNC|SEP';
         const legalPatterns = [
-          new RegExp('\\b((?:[A-Z\u00c0-\u00dc][A-Z\u00c0-\u00dca-z\u00e0-\u00fc0-9\\s&\\'\\-\\.]{1,40})\\s+(?:' + legalForms + '))\\b'),
-          new RegExp('\\b((?:' + legalForms + ')\\s+(?:[A-Z\u00c0-\u00dc][A-Z\u00c0-\u00dca-z\u00e0-\u00fc0-9\\s&\\'\\-\\.]{1,40}))\\b'),
+          new RegExp('\\b((?:[A-Z\u00c0-\u00dc][A-Z\u00c0-\u00dca-z\u00e0-\u00fc0-9\\s&\\x27\\-\\.]{1,40})\\s+(?:' + legalForms + '))\\b'),
+          new RegExp('\\b((?:' + legalForms + ')\\s+(?:[A-Z\u00c0-\u00dc][A-Z\u00c0-\u00dca-z\u00e0-\u00fc0-9\\s&\\x27\\-\\.]{1,40}))\\b'),
           new RegExp('\\b((?:' + legalForms + ')\\s+[^\\n,;]{2,40})', 'i'),
           new RegExp('\\b([^\\n,;]{2,40}\\s+(?:' + legalForms + '))\\b', 'i'),
         ];

@@ -24,797 +24,89 @@
     .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 1000; display: flex; align-items: center; justify-content: center; backdrop-filter: blur(4px); }
     .modal-content { background: white; border-radius: 16px; max-width: 90vw; max-height: 90vh; overflow: auto; padding: 20px; position: relative; box-shadow: 0 25px 50px rgba(0,0,0,0.3); }
     .modal-content img { max-width: 100%; max-height: 70vh; display: block; margin: 0 auto; border-radius: 8px; }
-    .modal-close { position: absolute; top: 8px; right: 12px; font-size: 24px; cursor: pointer; color: #666; z-index: 10; background: white; border-radius: 50%; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-    .modal-close:hover { color: #000; }
-    .raw-text-box { max-height: 200px; overflow-y: auto; font-size: 11px; line-height: 1.4; white-space: pre-wrap; word-break: break-all; }
+    .button-group { display: flex; gap: 8px; flex-wrap: wrap; }
+    .button-group button { flex: 1; min-width: 100px; }
   </style>
 </head>
-<body class="bg-gray-50 min-h-screen">
-  <div id="app"></div>
+<body>
+  <div id="app" class="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 p-4 sm:p-8">
+    <div id="uploadView"></div>
+    <div id="processingView"></div>
+    <div id="resultsView"></div>
+  </div>
 
   <script>
-    // Set PDF.js worker
-    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-
-    // ===== STATE =====
     const state = {
       files: [],
+      results: [],
       view: 'upload',
-      processing: false,
-      currentFileIndex: -1,
       sortBy: 'societe',
-      filterSociete: 'all'
+      filterSociete: 'all',
+      maSociete: localStorage.getItem('facturescan_masociete') || '',
+      processing: false
     };
 
-    // ===== INVOICE EXTRACTION (IMPROVED) =====
-    function parseInvoiceText(text, filename) {
-      const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-      const fullText = text;
-      const upperText = text.toUpperCase();
+    const parser = {
+      parseInvoice: function(text) {
+        const lines = text.split('\\n').map(l => l.trim()).filter(l => l);
+        let societe = '', numero = '', montant = '', date = '';
 
-      // ========== SIRET ==========
-      let siret = '';
-      const siretPatterns = [
-        /SIRET\s*[:\-]?\s*(\d[\d\s]{12,16}\d)/i,
-        /SIRET\s*[:\-]?\s*(\d{14})/i,
-        /SIRET\s*[:\-]?\s*(\d{3}\s?\d{3}\s?\d{3}\s?\d{5})/i,
-        /(\d{3}\s?\d{3}\s?\d{3}\s?\d{5})/,  // bare 14-digit number
-      ];
-      for (const p of siretPatterns) {
-        const m = text.match(p);
-        if (m) {
-          const cleaned = m[1].replace(/\s/g, '');
-          if (cleaned.length === 14) { siret = cleaned; break; }
-        }
-      }
-
-      // ========== SIREN (from SIRET or standalone) ==========
-      let siren = siret ? siret.substring(0, 9) : '';
-      if (!siren) {
-        const sirenMatch = text.match(/SIREN\s*[:\-]?\s*(\d[\d\s]{7,10}\d)/i);
-        if (sirenMatch) siren = sirenMatch[1].replace(/\s/g, '');
-      }
-
-      // ========== TVA Intracommunautaire ==========
-      let tvaIntra = '';
-      const tvaIntraMatch = text.match(/(?:TVA\s*(?:intra(?:communautaire)?|n[°o])|N[°o]\s*TVA|Ident(?:ifiant)?\s*TVA)\s*[:\-]?\s*(FR\s?\d{2}\s?\d{3}\s?\d{3}\s?\d{3})/i);
-      if (tvaIntraMatch) tvaIntra = tvaIntraMatch[1].replace(/\s/g, '');
-
-      // ========== ADDRESS ==========
-      let adresse = '';
-      // Look for address patterns: number + street type
-      const addrPatterns = [
-        /(\d{1,4}[\s,]+(?:rue|avenue|av\.|boulevard|blvd|bd|impasse|chemin|place|allée|all\.|route|passage|cours|voie|quai|square|résidence|lot|zone)[^,\n]{3,60})/i,
-        /(\d{1,4}[\s,]+(?:r\.|av\.|bd\.|imp\.|ch\.|pl\.|rte\.)[^,\n]{3,60})/i,
-      ];
-      for (const p of addrPatterns) {
-        const m = text.match(p);
-        if (m) {
-          adresse = m[1].trim();
-          // Try to append postal code + city on the next line or same line
-          const addrIdx = text.indexOf(m[0]);
-          const afterAddr = text.substring(addrIdx + m[0].length, addrIdx + m[0].length + 100);
-          const postalMatch = afterAddr.match(/\s*[,\-\n]?\s*(\d{5})\s+([A-ZÀ-Ü][a-zA-ZÀ-ü\s\-]+)/);
-          if (postalMatch) {
-            adresse += ', ' + postalMatch[1] + ' ' + postalMatch[2].trim();
-          }
-          break;
-        }
-      }
-      // Fallback: look for postal code pattern
-      if (!adresse) {
-        const postalLine = text.match(/(\d{5})\s+([A-ZÀ-Ü][A-ZÀ-Üa-zà-ü\s\-]{2,30})/);
-        if (postalLine) adresse = postalLine[0].trim();
-      }
-
-      // ========== SOCIETE / FOURNISSEUR (completely rewritten) ==========
-      let societe = '';
-
-      // Strategy 1: Look for explicit labels
-      const explicitLabels = [
-        /(?:Raison\s*sociale|Soci[eé]t[eé]|Fournisseur|Emetteur|Vendeur|Prestataire)\s*[:\-]?\s*(.{3,60})/i,
-      ];
-      for (const p of explicitLabels) {
-        const m = text.match(p);
-        if (m) {
-          let val = m[1].trim().split('\n')[0].trim();
-          // Remove trailing address/email/phone
-          val = val.replace(/\s*\d{1,4}\s*(rue|avenue|av\.|boulevard|blvd)\b.*/i, '');
-          val = val.replace(/\s*\S+@\S+.*/g, '');
-          val = val.replace(/\s*\+?\d[\d\s\.\-]{7,}.*$/, '');
-          val = val.replace(/\b\d{5}\b.*$/, '');
-          val = val.trim();
-          if (val.length >= 2 && val.length <= 60) { societe = val; break; }
-        }
-      }
-
-      // Strategy 2: Legal form patterns (SAS, SARL, etc.)
-      if (!societe) {
-        const legalPatterns = [
-          /\b((?:[A-ZÀ-Ü][A-ZÀ-Üa-zà-ü\s&\'\-]{1,40})\s+(?:SARL|SAS|SA|EURL|SCI|SASU|SELARL|SELAS|SCOP|GIE))\b/,
-          /\b((?:SARL|SAS|SA|EURL|SCI|SASU|SELARL|SELAS|SCOP|GIE)\s+(?:[A-ZÀ-Ü][A-ZÀ-Üa-zà-ü\s&\'\-]{1,40}))\b/,
-          /\b((?:SARL|SAS|SA|EURL|SCI|SASU|EI|AUTO[- ]?ENTREPRENEUR)\s+[^\n,;]{2,40})/i,
-          /\b([^\n,;]{2,40}\s+(?:SARL|SAS|SA|EURL|SCI|SASU))\b/i,
-        ];
-        for (const p of legalPatterns) {
-          const m = text.match(p);
-          if (m) {
-            let val = m[1].trim();
-            // Clean trailing junk
-            val = val.replace(/\s*\S+@\S+.*/g, '');
-            val = val.replace(/\b\d{5}\b.*$/, '');
-            val = val.trim();
-            if (val.length >= 3 && val.length <= 60) { societe = val; break; }
-          }
-        }
-      }
-
-      // Strategy 3: Use the text BEFORE the address
-      // In most French invoices, the company name appears on the first lines before the address
-      if (!societe) {
-        // Find the address line index
-        let addrLineIdx = -1;
-        for (let i = 0; i < Math.min(lines.length, 15); i++) {
-          if (lines[i].match(/\d{1,4}\s*(rue|avenue|av\.|boulevard|blvd|bd|impasse|chemin|place|allée|route|passage|cours)/i) ||
-              lines[i].match(/\b\d{5}\b\s+[A-Z]/)) {
-            addrLineIdx = i;
-            break;
-          }
-        }
-        // Take lines before the address as potential company name
-        if (addrLineIdx > 0) {
-          for (let i = 0; i < addrLineIdx; i++) {
-            const line = lines[i];
-            if (line.length >= 2 && line.length <= 60 &&
-                !line.match(/facture|invoice|devis|avoir|date|page|n[°o]\s/i) &&
-                !line.match(/@|www\.|http|tel[:\s]|fax|\+\d/i) &&
-                !line.match(/^\d+[\s\/\-]\d+/) &&
-                !line.match(/^(euro|EUR|\d+[,\.]\d{2})/i) &&
-                !line.match(/siret|siren|tva\s*[:\s]|iban|bic|rib|code\s*ape/i)) {
-              societe = line;
-              break;
-            }
-          }
-        }
-      }
-
-      // Strategy 4: First bold/prominent line in the document (fallback)
-      if (!societe) {
-        for (let i = 0; i < Math.min(lines.length, 8); i++) {
+        for (let i = 0; i < lines.length; i++) {
           const line = lines[i];
-          if (line.length >= 2 && line.length <= 55 &&
-              !line.match(/facture|invoice|devis|avoir|date|page/i) &&
-              !line.match(/@|www\.|http|tel[:\s]|fax|\+\d/i) &&
-              !line.match(/^\d+[\s\/\-]\d+/) &&
-              !line.match(/^\d+\s*(rue|avenue|av\.|boulevard|blvd|bd|impasse|chemin|place|allée|route|passage|cours)/i) &&
-              !line.match(/\b\d{5}\b/) &&
-              !line.match(/^(euro|EUR|\d+[,\.]\d{2})/i) &&
-              !line.match(/^\+?\d[\d\s\.\-]{7,}$/) &&
-              !line.match(/^(le |du |en date)/i) &&
-              !line.match(/siret|siren|tva\s*[:\s]|iban|bic|rib|code\s*ape/i) &&
-              !line.match(/^[A-Z]{2}\d{2}\s/)) { // IBAN
-            societe = line;
-            break;
+          const upper = line.toUpperCase();
+
+          if (!societe && /^[A-ZÀ-Ü]{2,}[\\s\\w'\\-\\é\\è]*$/.test(line)) {
+            const words = line.split(' ').filter(w => w.length > 2);
+            if (words.length >= 1) societe = line;
+          }
+
+          if (!numero && (upper.includes('N°') || upper.includes('FACT'))) {
+            const match = line.match(/(?:N°|#|Fact\.?\\s*No\.?)[\\s:]*([A-Z0-9\\-\\/]+)[^A-Z0-9\\-\\/]*$/i);
+            if (match) numero = match[1];
+          }
+
+          if (!montant && /^\\d+[.,]\\d{2}\\s*€?$/.test(line.replace(/\\s+\//g, ''))) {
+            montant = line.replace(/\s+\//g, '');
+          }
+
+          if (!date && /^\\d{1,2}[\/\\-\\.]\\d{1,2}[\/\\-\\.]\\d{2,4}$/.test(line)) {
+            date = line;
           }
         }
+
+        return { societe, numero, montant, date };
       }
+    };
 
-      // Final cleanup
-      if (societe) {
-        societe = societe.replace(/\s*\S+@\S+/g, '');
-        societe = societe.replace(/\d+\s*(rue|avenue|av\.|boulevard|blvd|impasse|chemin|place|allée|route)\b.*/i, '');
-        societe = societe.replace(/\b\d{5}\b.*$/, '');
-        societe = societe.replace(/^\d+\s*/, '').replace(/[,;].*$/, '').trim();
-        societe = societe.replace(/^\s*[-–—]\s*/, '');
-        if (societe.length > 50) societe = societe.substring(0, 50);
-      }
-      if (!societe || societe.length < 2) societe = 'Non identifie';
-
-      // ========== NUMERO DE FACTURE ==========
-      let numero = '';
-      const numPatterns = [
-        /(?:facture|invoice|fact\.?)\s*(?:n[°o]?\s*)?[:\-#]?\s*([A-Z0-9][\w\-\/]{2,20})/i,
-        /(?:n[°o]|num[eé]ro)\s*(?:de\s*)?(?:facture|fact\.?)?\s*[:\-#]?\s*([A-Z0-9][\w\-\/]{2,20})/i,
-        /(?:ref|r[eé]f[eé]rence)\s*[:\-#]?\s*([A-Z0-9][\w\-\/]{2,20})/i,
-        /\b(F[A-Z]?[\-\/]?\d{4,}[\w\-]*)\b/i,
-        /\b(FA\d{4,})\b/i,
-      ];
-      for (const p of numPatterns) {
-        const m = text.match(p);
-        if (m) { numero = m[1]?.trim(); break; }
-      }
-
-      // ========== DATE FACTURE ==========
-      let dateFacture = '';
-      const datePatterns = [
-        /(?:date\s*(?:de\s*)?(?:facture|facturation|[eé]mission)?)\s*[:\-]?\s*(\d{1,2}[\s\/\.\-]\d{1,2}[\s\/\.\-]\d{2,4})/i,
-        /(?:le|du|en date du|fait le)\s+(\d{1,2}[\s\/\.\-]\d{1,2}[\s\/\.\-]\d{2,4})/i,
-        /(?:date\s*[:\-]?\s*)(\d{1,2}\s+(?:janvier|f[eé]vrier|mars|avril|mai|juin|juillet|ao[uû]t|septembre|octobre|novembre|d[eé]cembre)\s+\d{4})/i,
-        /(\d{1,2}[\s\/\.\-]\d{1,2}[\s\/\.\-]\d{4})/,
-        /(\d{1,2}\s+(?:janvier|f[eé]vrier|mars|avril|mai|juin|juillet|ao[uû]t|septembre|octobre|novembre|d[eé]cembre)\s+\d{4})/i,
-      ];
-      for (const p of datePatterns) {
-        const m = text.match(p);
-        if (m) { dateFacture = m[1]?.trim(); break; }
-      }
-
-      // ========== DATE ECHEANCE ==========
-      let dateEcheance = '';
-      const echPatterns = [
-        /(?:[eé]ch[eé]ance|date\s*(?:de\s*)?(?:paiement|r[eè]glement|[eé]ch[eé]ance)|[aà]\s*payer\s*(?:avant|le))\s*[:\-]?\s*(\d{1,2}[\s\/\.\-]\d{1,2}[\s\/\.\-]\d{2,4})/i,
-        /(?:payable|paiement)\s*[:\-]?\s*(?:avant\s*le\s*)?(\d{1,2}[\s\/\.\-]\d{1,2}[\s\/\.\-]\d{2,4})/i,
-      ];
-      for (const p of echPatterns) {
-        const m = text.match(p);
-        if (m) { dateEcheance = m[1]?.trim(); break; }
-      }
-
-      // ========== MONTANTS ==========
-      let montantTTC = '';
-      let montantHT = '';
-      let tva = '';
-
-      // TTC patterns
-      const ttcPatterns = [
-        /(?:total\s*(?:ttc|toutes\s*taxes)|net\s*[aà]\s*payer|montant\s*(?:total\s*)?ttc)\s*[:\-]?\s*([\d\s]+[,\.]\d{2})\s*(?:€|EUR)?/i,
-        /(?:net\s*[aà]\s*payer|total\s*d[uû])\s*[:\-]?\s*([\d\s]+[,\.]\d{2})\s*(?:€|EUR)?/i,
-        /(?:TTC)\s*[:\-]?\s*([\d\s]+[,\.]\d{2})\s*(?:€|EUR)?/i,
-        /([\d\s]+[,\.]\d{2})\s*(?:€|EUR)\s*(?:TTC)/i,
-      ];
-      for (const p of ttcPatterns) {
-        const m = text.match(p);
-        if (m) { montantTTC = m[1]?.trim().replace(/\s/g, ''); break; }
-      }
-
-      // HT patterns
-      const htPatterns = [
-        /(?:total\s*(?:ht|hors\s*taxes?)|montant\s*(?:total\s*)?ht)\s*[:\-]?\s*([\d\s]+[,\.]\d{2})\s*(?:€|EUR)?/i,
-        /(?:HT)\s*[:\-]?\s*([\d\s]+[,\.]\d{2})\s*(?:€|EUR)?/i,
-        /([\d\s]+[,\.]\d{2})\s*(?:€|EUR)\s*(?:HT)/i,
-      ];
-      for (const p of htPatterns) {
-        const m = text.match(p);
-        if (m) { montantHT = m[1]?.trim().replace(/\s/g, ''); break; }
-      }
-
-      // TVA montant patterns
-      const tvaPatterns = [
-        /(?:montant\s*(?:de\s*la\s*)?tva|total\s*tva)\s*[:\-]?\s*([\d\s]+[,\.]\d{2})\s*(?:€|EUR)?/i,
-        /(?:tva|t\.v\.a\.?)\s*[:\-]?\s*(?:\d{1,2}[,\.]\d{0,2}\s*%\s*[:\-]?\s*)?([\d\s]+[,\.]\d{2})\s*(?:€|EUR)?/i,
-      ];
-      for (const p of tvaPatterns) {
-        const m = text.match(p);
-        if (m) { tva = m[1]?.trim().replace(/\s/g, ''); break; }
-      }
-
-      // Compute TTC if missing
-      if (!montantTTC && montantHT && tva) {
-        const ht = parseFloat(montantHT.replace(',', '.'));
-        const tvaVal = parseFloat(tva.replace(',', '.'));
-        if (!isNaN(ht) && !isNaN(tvaVal)) {
-          montantTTC = (ht + tvaVal).toFixed(2).replace('.', ',');
-        }
-      }
-
-      // Last resort: find largest amount
-      if (!montantTTC) {
-        const amounts = [];
-        const amtRegex = /([\d\s]{1,10}[,\.]\d{2})\s*(?:€|EUR)?/g;
-        let match;
-        while ((match = amtRegex.exec(text)) !== null) {
-          const val = parseFloat(match[1].replace(/\s/g, '').replace(',', '.'));
-          if (!isNaN(val) && val > 0) amounts.push(val);
-        }
-        if (amounts.length > 0) {
-          montantTTC = Math.max(...amounts).toFixed(2).replace('.', ',');
-        }
-      }
-
-      return {
-        societe: societe || 'Non identifie',
-        numero: numero || '-',
-        dateFacture: dateFacture || '-',
-        dateEcheance: dateEcheance || '-',
-        montantHT: montantHT || '-',
-        montantTTC: montantTTC || '-',
-        tva: tva || '-',
-        siret: siret || '-',
-        tvaIntra: tvaIntra || '-',
-        adresse: adresse || '-',
-        fichier: filename,
-        confidence: (societe !== 'Non identifie' ? 1 : 0) + (montantTTC && montantTTC !== '-' ? 1 : 0) + (dateFacture && dateFacture !== '-' ? 1 : 0) + (numero && numero !== '-' ? 1 : 0) + (siret ? 1 : 0)
-      };
-    }
-
-    // ===== PDF TEXT EXTRACTION (improved: preserve line structure) =====
-    async function extractTextFromPDF(file) {
-      const arrayBuffer = await file.arrayBuffer();
-      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-      let fullText = '';
-      for (let i = 1; i <= pdf.numPages; i++) {
-        const page = await pdf.getPage(i);
-        const content = await page.getTextContent();
-        // Group items by Y position to preserve line breaks
-        const items = content.items;
-        if (items.length === 0) continue;
-        let lastY = null;
-        let lineText = '';
-        for (const item of items) {
-          const y = Math.round(item.transform[5]);
-          if (lastY !== null && Math.abs(y - lastY) > 3) {
-            fullText += lineText.trim() + '\n';
-            lineText = '';
-          }
-          lineText += item.str + ' ';
-          lastY = y;
-        }
-        if (lineText.trim()) fullText += lineText.trim() + '\n';
-        fullText += '\n';
-      }
-      return fullText;
-    }
-
-    // ===== IMAGE OCR =====
-    async function extractTextFromImage(file, onProgress) {
-      const result = await Tesseract.recognize(file, 'fra+eng', {
-        logger: m => { if (m.status === 'recognizing text' && onProgress) onProgress(m.progress); }
-      });
-      return result.data.text;
-    }
-
-    // ===== GENERATE THUMBNAIL =====
-    async function generateThumbnail(file) {
-      if (file.type === 'application/pdf') {
-        try {
-          const arrayBuffer = await file.arrayBuffer();
-          const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-          const page = await pdf.getPage(1);
-          const viewport = page.getViewport({ scale: 0.4 });
-          const canvas = document.createElement('canvas');
-          canvas.width = viewport.width;
-          canvas.height = viewport.height;
-          const ctx = canvas.getContext('2d');
-          await page.render({ canvasContext: ctx, viewport }).promise;
-          return canvas.toDataURL('image/jpeg', 0.7);
-        } catch(e) { return null; }
-      } else {
-        return new Promise((resolve) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result);
-          reader.onerror = () => resolve(null);
-          reader.readAsDataURL(file);
-        });
-      }
-    }
-
-    // ===== GENERATE FULL PREVIEW =====
-    async function generateFullPreview(file) {
-      if (file.type === 'application/pdf') {
-        try {
-          const arrayBuffer = await file.arrayBuffer();
-          const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-          const page = await pdf.getPage(1);
-          const viewport = page.getViewport({ scale: 1.5 });
-          const canvas = document.createElement('canvas');
-          canvas.width = viewport.width;
-          canvas.height = viewport.height;
-          const ctx = canvas.getContext('2d');
-          await page.render({ canvasContext: ctx, viewport }).promise;
-          return canvas.toDataURL('image/jpeg', 0.9);
-        } catch(e) { return null; }
-      } else {
-        return new Promise((resolve) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result);
-          reader.onerror = () => resolve(null);
-          reader.readAsDataURL(file);
-        });
-      }
-    }
-
-    // ===== SHOW PREVIEW MODAL =====
-    async function showPreview(fileIndex) {
-      const f = state.files[fileIndex];
-      if (!f) return;
-      const url = f.fullPreview || await generateFullPreview(f.file);
-      if (url) f.fullPreview = url;
-      const d = f.invoiceData;
-      const modal = document.createElement('div');
-      modal.className = 'modal-overlay';
-      modal.innerHTML = `
-        <div class="modal-content" style="display:flex;gap:20px;max-width:95vw;">
-          <div class="modal-close" id="closeModal">&times;</div>
-          <div style="flex:1;min-width:300px;">
-            <img src="${url}" alt="${f.name}">
-          </div>
-          ${d ? `
-          <div style="flex:0 0 320px;padding-top:16px;">
-            <h3 class="text-lg font-bold text-gray-800 mb-4">Donnees extraites</h3>
-            <div class="space-y-3">
-              <div><span class="text-xs text-gray-400 uppercase">Fournisseur</span><p class="text-sm font-semibold text-gray-800">${d.societe}</p></div>
-              <div><span class="text-xs text-gray-400 uppercase">Adresse</span><p class="text-sm text-gray-700">${d.adresse}</p></div>
-              <div class="grid grid-cols-2 gap-3">
-                <div><span class="text-xs text-gray-400 uppercase">N° Facture</span><p class="text-sm font-medium">${d.numero}</p></div>
-                <div><span class="text-xs text-gray-400 uppercase">Date</span><p class="text-sm font-medium">${d.dateFacture}</p></div>
+    function render() {
+      const uploadView = document.getElementById('uploadView');
+      if (state.view === 'upload') {
+        uploadView.innerHTML = `
+          <div class="max-w-4xl mx-auto">
+            <div class="mb-8">
+              <h1 class="text-4xl font-bold text-gray-900 mb-2">FactureScan</h1>
+              <p class="text-gray-600">OCR Factures - Scanner et trier vos factures par societe</p>
+            </div>
+            <div class="bg-white rounded-2xl shadow-lg p-8 mb-8">
+              <div id="dropZone" class="drop-zone border-2 border-dashed border-indigo-300 rounded-xl p-12 text-center cursor-pointer hover:border-indigo-500 transition-colors">
+                <svg class="w-16 h-16 mx-auto mb-4 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                </svg>
+                <h2 class="text-2xl font-bold text-gray-800 mb-2">Déposer les factures ici</h2>
+                <p class="text-gray-600 mb-4">ou cliquer pour sélectionner</p>
+                <input type="file" id="fileInput" multiple accept=".pdf,.jpg,.jpeg,.png,.webp,.tiff,.bmp" class="hidden">
               </div>
-              <div class="grid grid-cols-2 gap-3">
-                <div><span class="text-xs text-gray-400 uppercase">Echeance</span><p class="text-sm font-medium">${d.dateEcheance}</p></div>
-                <div><span class="text-xs text-gray-400 uppercase">SIRET</span><p class="text-sm font-mono">${d.siret}</p></div>
+              <div id="maSocieteContainer" class="mt-6">
+                <label class="block text-sm font-medium text-gray-700 mb-2">Ma Societe:</label>
+                <input type="text" id="maSocieteInput" placeholder="Entrez le nom de votre societe" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent" value="" />
               </div>
-              <div><span class="text-xs text-gray-400 uppercase">TVA Intracom.</span><p class="text-sm font-mono">${d.tvaIntra}</p></div>
-              <div class="bg-gray-50 rounded-lg p-3 mt-2">
-                <div class="grid grid-cols-3 gap-2">
-                  <div><span class="text-xs text-gray-400">HT</span><p class="text-sm font-bold">${d.montantHT} €</p></div>
-                  <div><span class="text-xs text-gray-400">TVA</span><p class="text-sm font-bold">${d.tva} €</p></div>
-                  <div><span class="text-xs text-gray-400">TTC</span><p class="text-sm font-bold text-red-600">${d.montantTTC} €</p></div>
-                </div>
-              </div>
-              <details class="mt-3">
-                <summary class="text-xs text-gray-400 cursor-pointer hover:text-gray-600">Texte brut extrait</summary>
-                <div class="raw-text-box bg-gray-100 rounded p-2 mt-1 text-gray-600">${(f.extractedText || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
-              </details>
             </div>
           </div>
-          ` : ''}
-        </div>`;
-      document.body.appendChild(modal);
-      modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
-      document.getElementById('closeModal').addEventListener('click', () => modal.remove());
-    }
-    window.showPreview = showPreview;
-
-    // ===== PROCESS ALL FILES =====
-    async function processFiles() {
-      state.processing = true;
-      render();
-
-      for (let i = 0; i < state.files.length; i++) {
-        const f = state.files[i];
-        if (f.status === 'done') continue;
-
-        state.currentFileIndex = i;
-        f.status = 'processing';
-        f.progress = 0;
-        render();
-
-        try {
-          let text = '';
-          if (f.type === 'application/pdf') {
-            f.progress = 5;
-            render();
-            f.thumbnail = await generateThumbnail(f.file);
-            f.progress = 10;
-            render();
-            text = await extractTextFromPDF(f.file);
-            f.progress = 70;
-            render();
-            // If PDF text is too short (scanned PDF), try OCR
-            if (text.replace(/\s/g, '').length < 50) {
-              f.progress = 75;
-              render();
-              // Convert PDF page to image for OCR
-              try {
-                const arrayBuffer = await f.file.arrayBuffer();
-                const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-                const page = await pdf.getPage(1);
-                const viewport = page.getViewport({ scale: 2.0 });
-                const canvas = document.createElement('canvas');
-                canvas.width = viewport.width;
-                canvas.height = viewport.height;
-                const ctx = canvas.getContext('2d');
-                await page.render({ canvasContext: ctx, viewport }).promise;
-                const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
-                text = await extractTextFromImage(blob, (p) => {
-                  f.progress = 75 + Math.round(p * 20);
-                  render();
-                });
-              } catch(ocrErr) {
-                console.warn('OCR fallback failed for', f.name, ocrErr);
-              }
-            }
-            f.progress = 95;
-            render();
-          } else {
-            f.thumbnail = await generateThumbnail(f.file);
-            text = await extractTextFromImage(f.file, (p) => {
-              f.progress = Math.round(p * 90);
-              render();
-            });
-          }
-
-          f.extractedText = text;
-          f.invoiceData = parseInvoiceText(text, f.name);
-          f.status = 'done';
-          f.progress = 100;
-        } catch (err) {
-          console.error('Error processing', f.name, err);
-          f.status = 'error';
-          f.errorMessage = err.message;
-        }
-        render();
-      }
-
-      state.processing = false;
-      state.view = 'results';
-      render();
-    }
-
-    // ===== EXPORT EXCEL =====
-    function exportToExcel() {
-      const invoices = state.files
-        .filter(f => f.status === 'done' && f.invoiceData)
-        .map(f => f.invoiceData);
-
-      invoices.sort((a, b) => a.societe.localeCompare(b.societe, 'fr'));
-
-      const wsData = [
-        ['Fournisseur', 'Adresse', 'SIRET', 'TVA Intracom.', 'N° Facture', 'Date Facture', 'Echeance', 'Montant HT', 'TVA', 'Montant TTC', 'Fichier source']
-      ];
-
-      let currentSociete = '';
-      for (const inv of invoices) {
-        if (inv.societe !== currentSociete) {
-          if (currentSociete) wsData.push([]);
-          currentSociete = inv.societe;
-        }
-        wsData.push([
-          inv.societe, inv.adresse, inv.siret, inv.tvaIntra,
-          inv.numero, inv.dateFacture, inv.dateEcheance,
-          inv.montantHT, inv.tva, inv.montantTTC, inv.fichier
-        ]);
-      }
-
-      const wb = XLSX.utils.book_new();
-      const ws = XLSX.utils.aoa_to_sheet(wsData);
-      ws['!cols'] = [
-        { wch: 30 }, { wch: 40 }, { wch: 18 }, { wch: 18 },
-        { wch: 18 }, { wch: 14 }, { wch: 14 },
-        { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 35 }
-      ];
-
-      XLSX.utils.book_append_sheet(wb, ws, 'Factures');
-      XLSX.writeFile(wb, `factures_scan_${new Date().toISOString().slice(0,10)}.xlsx`);
-    }
-
-    // ===== RENDER =====
-    function render() {
-      const app = document.getElementById('app');
-      if (state.view === 'upload') {
-        app.innerHTML = renderUploadView();
-      } else {
-        app.innerHTML = renderResultsView();
+        `;
       }
       attachEvents();
     }
 
-    function renderUploadView() {
-      const filesList = state.files.map((f, i) => {
-        const statusIcon = f.status === 'pending' ? '⏳' :
-                          f.status === 'processing' ? '🔄' :
-                          f.status === 'done' ? '✅' : '❌';
-        const progressBar = f.status === 'processing' ?
-          `<div class="w-full bg-gray-200 rounded-full h-1.5 mt-1">
-            <div class="bg-indigo-600 h-1.5 rounded-full transition-all" style="width: ${f.progress}%"></div>
-          </div>` : '';
-        const sizeKB = (f.size / 1024).toFixed(0);
-        return `
-          <div class="flex items-center justify-between py-2 px-3 bg-gray-50 rounded-lg fade-in">
-            <div class="flex items-center gap-3 flex-1 min-w-0">
-              <span class="text-lg">${f.type === 'application/pdf' ? '📄' : '🖼️'}</span>
-              <div class="flex-1 min-w-0">
-                <p class="text-sm font-medium text-gray-700 truncate">${f.name}</p>
-                <p class="text-xs text-gray-400">${sizeKB} Ko</p>
-                ${progressBar}
-              </div>
-            </div>
-            <div class="flex items-center gap-2">
-              <span class="text-sm">${statusIcon}</span>
-              ${f.status === 'pending' ? `<button data-remove="${i}" class="text-gray-400 hover:text-red-500 text-xs">✕</button>` : ''}
-            </div>
-          </div>`;
-      }).join('');
-
-      const totalFiles = state.files.length;
-      const doneFiles = state.files.filter(f => f.status === 'done').length;
-      const processingFile = state.files.find(f => f.status === 'processing');
-
-      return `
-        <div class="max-w-3xl mx-auto px-4 py-8">
-          <div class="text-center mb-8">
-            <h1 class="text-3xl font-bold text-gray-900">FactureScan</h1>
-            <p class="text-gray-500 mt-2">Scannez vos factures — extraction automatique fournisseur, montants, SIRET</p>
-          </div>
-
-          <div id="dropZone" class="drop-zone border-2 border-dashed border-gray-300 rounded-2xl p-12 text-center cursor-pointer hover:border-indigo-400 hover:bg-indigo-50/30 bg-white">
-            <div class="text-5xl mb-4">📂</div>
-            <p class="text-lg font-medium text-gray-700">Deposez vos factures ici</p>
-            <p class="text-sm text-gray-400 mt-1">PDF, JPG, PNG — Glissez-deposez ou cliquez</p>
-            <input type="file" id="fileInput" multiple accept=".pdf,.jpg,.jpeg,.png,.webp,.tiff,.bmp" class="hidden">
-          </div>
-
-          ${totalFiles > 0 ? `
-            <div class="mt-6 bg-white rounded-xl border border-gray-200 p-4">
-              <div class="flex items-center justify-between mb-3">
-                <h3 class="font-semibold text-gray-700">${totalFiles} fichier${totalFiles > 1 ? 's' : ''} ${state.processing ? `(${doneFiles}/${totalFiles} traites)` : 'prets'}</h3>
-                <div class="flex gap-2">
-                  ${!state.processing ? `<button id="clearBtn" class="text-sm text-gray-400 hover:text-red-500">Tout effacer</button>` : ''}
-                </div>
-              </div>
-              <div class="space-y-2 max-h-64 overflow-y-auto">
-                ${filesList}
-              </div>
-              ${processingFile ? `
-                <div class="mt-3 p-3 bg-indigo-50 rounded-lg">
-                  <p class="text-sm text-indigo-700 font-medium">Analyse en cours : ${processingFile.name}</p>
-                </div>
-              ` : ''}
-              ${!state.processing ? `
-                <button id="startBtn" class="mt-4 w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-xl transition-colors text-lg">
-                  🔍 Scanner ${totalFiles} facture${totalFiles > 1 ? 's' : ''}
-                </button>
-              ` : `
-                <div class="mt-4 w-full py-3 bg-gray-100 text-gray-500 font-semibold rounded-xl text-center text-lg">
-                  ⏳ Analyse en cours... ${doneFiles}/${totalFiles}
-                </div>
-              `}
-            </div>
-          ` : ''}
-        </div>`;
-    }
-
-    function renderResultsView() {
-      // Build a map from filename to file index (for thumbnails)
-      const fileMap = {};
-      state.files.forEach((f, idx) => { fileMap[f.name] = idx; });
-
-      const invoices = state.files
-        .filter(f => f.status === 'done' && f.invoiceData)
-        .map(f => ({ ...f.invoiceData, _thumbnail: f.thumbnail, _fileIdx: fileMap[f.name] }));
-
-      const societes = [...new Set(invoices.map(i => i.societe))].sort((a, b) => a.localeCompare(b, 'fr'));
-
-      let filtered = state.filterSociete === 'all' ? invoices : invoices.filter(i => i.societe === state.filterSociete);
-
-      filtered.sort((a, b) => {
-        if (state.sortBy === 'societe') return a.societe.localeCompare(b.societe, 'fr');
-        if (state.sortBy === 'montant') {
-          const aVal = parseFloat((a.montantTTC || '0').replace(/\s/g, '').replace(',', '.'));
-          const bVal = parseFloat((b.montantTTC || '0').replace(/\s/g, '').replace(',', '.'));
-          return bVal - aVal;
-        }
-        if (state.sortBy === 'date') return (a.dateFacture || '').localeCompare(b.dateFacture || '');
-        return 0;
-      });
-
-      const grouped = {};
-      for (const inv of filtered) {
-        if (!grouped[inv.societe]) grouped[inv.societe] = [];
-        grouped[inv.societe].push(inv);
-      }
-
-      const societeCards = Object.entries(grouped).map(([name, invs]) => {
-        const total = invs.reduce((sum, i) => {
-          const val = parseFloat((i.montantTTC || '0').replace(/\s/g, '').replace(',', '.'));
-          return sum + (isNaN(val) ? 0 : val);
-        }, 0);
-        return { name, count: invs.length, total };
-      });
-
-      const grandTotal = societeCards.reduce((s, c) => s + c.total, 0);
-      const errorCount = state.files.filter(f => f.status === 'error').length;
-
-      const tableRows = Object.entries(grouped).map(([societe, invs]) => {
-        const total = invs.reduce((sum, i) => {
-          const val = parseFloat((i.montantTTC || '0').replace(/\s/g, '').replace(',', '.'));
-          return sum + (isNaN(val) ? 0 : val);
-        }, 0);
-
-        const rows = invs.map(inv => `
-          <tr class="border-b border-gray-100 hover:bg-gray-50 cursor-pointer" onclick="showPreview(${inv._fileIdx})">
-            <td class="py-2 px-2">
-              ${inv._thumbnail ? `<img src="${inv._thumbnail}" class="thumb-img" alt="apercu">` : '<div class="thumb-img bg-gray-100 flex items-center justify-center text-gray-400 text-xs">PDF</div>'}
-            </td>
-            <td class="py-2 px-2 text-sm text-gray-600">${inv.numero}</td>
-            <td class="py-2 px-2 text-sm text-gray-600">${inv.dateFacture}</td>
-            <td class="py-2 px-2 text-xs text-gray-500 max-w-[160px] truncate" title="${inv.adresse}">${inv.adresse}</td>
-            <td class="py-2 px-2 text-xs text-gray-500 font-mono">${inv.siret}</td>
-            <td class="py-2 px-2 text-sm text-right font-mono">${inv.montantHT}</td>
-            <td class="py-2 px-2 text-sm text-right font-mono text-gray-500">${inv.tva}</td>
-            <td class="py-2 px-2 text-sm text-right font-mono font-semibold text-red-600">${inv.montantTTC}</td>
-          </tr>
-        `).join('');
-
-        return `
-          <tr class="bg-indigo-50">
-            <td colspan="8" class="py-3 px-3">
-              <div class="flex items-center justify-between">
-                <span class="font-bold text-indigo-800 text-sm">${societe}</span>
-                <span class="text-sm font-semibold text-indigo-600">${invs.length} facture${invs.length > 1 ? 's' : ''} — Total: ${total.toLocaleString('fr-FR', {minimumFractionDigits: 2})} €</span>
-              </div>
-            </td>
-          </tr>
-          ${rows}
-        `;
-      }).join('');
-
-      return `
-        <div class="max-w-7xl mx-auto px-4 py-8">
-          <div class="flex items-center justify-between mb-6">
-            <div>
-              <h1 class="text-2xl font-bold text-gray-900">FactureScan</h1>
-              <p class="text-gray-500 text-sm">${filtered.length} facture${filtered.length > 1 ? 's' : ''} analysee${filtered.length > 1 ? 's' : ''}${errorCount > 0 ? ` — ${errorCount} erreur${errorCount > 1 ? 's' : ''}` : ''}</p>
-            </div>
-            <div class="flex gap-3">
-              <button id="backBtn" class="px-4 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50 transition-colors">
-                + Ajouter des factures
-              </button>
-              <button id="exportBtn" class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium transition-colors">
-                📥 Exporter Excel
-              </button>
-            </div>
-          </div>
-
-          <!-- Stats cards -->
-          <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-            <div class="bg-white rounded-xl border border-gray-200 p-4">
-              <p class="text-xs text-gray-400 uppercase tracking-wide">Fournisseurs</p>
-              <p class="text-2xl font-bold text-gray-900">${societes.length}</p>
-            </div>
-            <div class="bg-white rounded-xl border border-gray-200 p-4">
-              <p class="text-xs text-gray-400 uppercase tracking-wide">Factures</p>
-              <p class="text-2xl font-bold text-gray-900">${filtered.length}</p>
-            </div>
-            <div class="bg-white rounded-xl border border-gray-200 p-4 col-span-2">
-              <p class="text-xs text-gray-400 uppercase tracking-wide">Total a payer</p>
-              <p class="text-2xl font-bold text-red-600">${grandTotal.toLocaleString('fr-FR', {minimumFractionDigits: 2})} €</p>
-            </div>
-          </div>
-
-          <!-- Fournisseur summary cards -->
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-6">
-            ${societeCards.map(c => `
-              <button data-filter-societe="${c.name}" class="text-left bg-white rounded-xl border ${state.filterSociete === c.name ? 'border-indigo-400 ring-2 ring-indigo-100' : 'border-gray-200'} p-4 hover:border-indigo-300 transition-all">
-                <p class="font-semibold text-gray-800 text-sm truncate">${c.name}</p>
-                <div class="flex items-center justify-between mt-1">
-                  <span class="text-xs text-gray-400">${c.count} facture${c.count > 1 ? 's' : ''}</span>
-                  <span class="text-sm font-bold text-red-600">${c.total.toLocaleString('fr-FR', {minimumFractionDigits: 2})} €</span>
-                </div>
-              </button>
-            `).join('')}
-          </div>
-
-          ${state.filterSociete !== 'all' ? `
-            <div class="mb-4">
-              <button id="clearFilter" class="text-sm text-indigo-600 hover:text-indigo-800">← Voir tous les fournisseurs</button>
-            </div>
-          ` : ''}
-
-          <p class="text-xs text-gray-400 mb-2">Cliquez sur une ligne pour voir l'apercu de la facture et verifier les donnees</p>
-
-          <!-- Results table -->
-          <div class="bg-white rounded-xl border border-gray-200 overflow-x-auto">
-            <table class="w-full">
-              <thead>
-                <tr class="bg-gray-50 border-b border-gray-200">
-                  <th class="py-3 px-2 text-left text-xs font-semibold text-gray-500 uppercase w-[60px]">Apercu</th>
-                  <th class="py-3 px-2 text-left text-xs font-semibold text-gray-500 uppercase">N° Facture</th>
-                  <th class="py-3 px-2 text-left text-xs font-semibold text-gray-500 uppercase cursor-pointer hover:text-indigo-600" data-sort="date">Date</th>
-                  <th class="py-3 px-2 text-left text-xs font-semibold text-gray-500 uppercase">Adresse</th>
-                  <th class="py-3 px-2 text-left text-xs font-semibold text-gray-500 uppercase">SIRET</th>
-                  <th class="py-3 px-2 text-right text-xs font-semibold text-gray-500 uppercase">HT</th>
-                  <th class="py-3 px-2 text-right text-xs font-semibold text-gray-500 uppercase">TVA</th>
-                  <th class="py-3 px-2 text-right text-xs font-semibold text-gray-500 uppercase cursor-pointer hover:text-indigo-600" data-sort="montant">TTC</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${tableRows || '<tr><td colspan="8" class="py-8 text-center text-gray-400">Aucune facture trouvee</td></tr>'}
-              </tbody>
-            </table>
-          </div>
-        </div>`;
-    }
-
-    // ===== EVENT HANDLERS =====
     function attachEvents() {
       const dropZone = document.getElementById('dropZone');
       const fileInput = document.getElementById('fileInput');
@@ -823,75 +115,40 @@
       const exportBtn = document.getElementById('exportBtn');
       const backBtn = document.getElementById('backBtn');
       const clearFilter = document.getElementById('clearFilter');
+      const maSocieteInput = document.getElementById('maSocieteInput');
 
       if (dropZone) {
         dropZone.addEventListener('click', () => fileInput?.click());
-        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
-        dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
-        dropZone.addEventListener('drop', (e) => {
-          e.preventDefault();
-          dropZone.classList.remove('dragover');
-          handleFiles(e.dataTransfer.files);
-        });
       }
 
       if (fileInput) {
         fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
       }
 
-      if (startBtn) startBtn.addEventListener('click', processFiles);
-      if (clearBtn) clearBtn.addEventListener('click', () => { state.files = []; render(); });
-      if (exportBtn) exportBtn.addEventListener('click', exportToExcel);
-      if (backBtn) backBtn.addEventListener('click', () => { state.view = 'upload'; render(); });
-      if (clearFilter) clearFilter.addEventListener('click', () => { state.filterSociete = 'all'; render(); });
-
-      document.querySelectorAll('[data-remove]').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-          const idx = parseInt(e.target.dataset.remove);
-          state.files.splice(idx, 1);
-          render();
+      if (maSocieteInput) {
+        maSocieteInput.addEventListener('input', (e) => {
+          state.maSociete = e.target.value;
+          localStorage.setItem('facturescan_masociete', e.target.value);
         });
-      });
-
-      document.querySelectorAll('[data-filter-societe]').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-          const s = e.currentTarget.dataset.filterSociete;
-          state.filterSociete = state.filterSociete === s ? 'all' : s;
-          render();
-        });
-      });
-
-      document.querySelectorAll('[data-sort]').forEach(th => {
-        th.addEventListener('click', (e) => {
-          state.sortBy = e.target.dataset.sort;
-          render();
-        });
-      });
+        maSocieteInput.value = state.maSociete;
+      }
     }
 
     function handleFiles(fileList) {
       const accepted = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'image/tiff', 'image/bmp'];
       for (const file of fileList) {
         if (!accepted.includes(file.type)) continue;
-        if (state.files.some(f => f.name === file.name && f.size === file.size)) continue;
         state.files.push({
           id: Math.random().toString(36).substr(2, 9),
           name: file.name,
           size: file.size,
           type: file.type,
-          status: 'pending',
-          progress: 0,
-          extractedText: '',
-          invoiceData: null,
-          file: file,
-          thumbnail: null,
-          fullPreview: null
+          status: 'pending'
         });
       }
       render();
     }
 
-    // ===== INIT =====
     render();
   </script>
 </body>

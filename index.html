@@ -3,12 +3,44 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  
-  
-  
-  �</style>
-  
-  ��<sI��>
+  <title>FactureScan - OCR Factures</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    body { font-family: 'Inter', sans-serif; }
+    .drop-zone { transition: all 0.3s ease; }
+    .drop-zone.dragover { border-color: #6366f1; background: #eef2ff; transform: scale(1.01); }
+    .fade-in { animation: fadeIn 0.3s ease-in; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    .progress-ring { transition: stroke-dashoffset 0.3s ease; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #f1f5f9; }
+    ::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 3px; }
+    .thumb-img { width: 50px; height: 66px; object-fit: cover; border-radius: 6px; border: 1px solid #e2e8f0; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s; }
+    .thumb-img:hover { transform: scale(1.15); box-shadow: 0 4px 16px rgba(0,0,0,0.2); }
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 1000; display: flex; align-items: center; justify-content: center; backdrop-filter: blur(4px); }
+    .modal-content { background: white; border-radius: 16px; max-width: 90vw; max-height: 90vh; overflow: auto; padding: 20px; position: relative; box-shadow: 0 25px 50px rgba(0,0,0,0.3); }
+    .modal-content img { max-width: 100%; max-height: 70vh; display: block; margin: 0 auto; border-radius: 8px; }
+    .button-group { display: flex; gap: 8px; flex-wrap: wrap; }
+    .button-group button { flex: 1; min-width: 100px; }
+    .invoice-row { transition: all 0.3s; }
+    .invoice-row:hover { background: #f9fafb; }
+    input, textarea, select { font-size: 16px; }
+    table { border-collapse: collapse; }
+    tbody tr { border-bottom: 1px solid #e5e7eb; }
+  </style>
+</head>
+<body>
+  <div id="app" class="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 p-4 sm:p-8">
+    <div id="uploadView"></div>
+    <div id="processingView"></div>
+    <div id="resultsView"></div>
+  </div>
+
+  <script>
     const state = {
       files: [],
       results: [],
@@ -22,30 +54,27 @@
     const parser = {
       parseInvoice: function(text) {
         const lines = text.split('\n').map(l => l.trim()).filter(l => l);
-        let societe = '',
-          numero = '',
-          montant = '',
-          date = '';
+        let societe = '', numero = '', montant = '', date = '';
 
         for (let i = 0; i < lines.length; i++) {
           const line = lines[i];
           const upper = line.toUpperCase();
 
-          if (!societe && /^[A-ZÀ-そ]{2,y^{\s-w'\-\é\è]*$/test(line)) {
+          if (!societe && /^[A-ZÀ-Ü]{2,}[\s\w'-éè]*$/.test(line)) {
             const words = line.split(' ').filter(w => w.length > 2);
             if (words.length >= 1) societe = line;
           }
 
-          if (!numero && (upper.includes('M°') || upper.includes('FACT'))) {
-            const match = line.match(\\/(?Ψà|#|Fact\\.?;\\s*No\\.?)[\\s:]*([A-Z0-9\\-\\/]+)[^A-Z0-9\\-\\/]*$\\/ii);
+          if (!numero && (upper.includes('N°') || upper.includes('FACT'))) {
+            const match = line.match(/(?:N°|#|Fact\.?\s*No\.?)[\s:]*([A-Z0-9\-/]+)[^A-Z0-9\-/]*$/i);
             if (match) numero = match[1];
           }
 
-          if (!montant && /^\\d+(.,]\\d{>}\\s*⥿$?/.test(line.replace(/\\s+\\/g, ''))) {
-            montant = line.replace(/\\s+\\/g, '');
+          if (!montant && /^\d+[.,]\d{2}\s*€?$/.test(line.replace(/\s+/g, ''))) {
+            montant = line.replace(/\s+/g, '');
           }
 
-          if (!date && /^\\d{1,2}[/\\-\\.]\\d{1,2}[\\/\\-\\.]\\d{2,t}$/.test(line)) {
+          if (!date && /^\d{1,2}[/-.]\d{1,2}[/-.]\d{2,4}$/.test(line)) {
             date = line;
           }
         }
@@ -57,24 +86,83 @@
     function render() {
       const uploadView = document.getElementById('uploadView');
       if (state.view === 'upload') {
-        uploadView.innk「�ents();
+        uploadView.innerHTML = `
+          <div class="max-w-4xl mx-auto">
+            <div class="mb-8">
+              <h1 class="text-4xl font-bold text-gray-900 mb-2">FactureScan</h1>
+              <p class="text-gray-600">OCR Factures - Scanner et trier vos factures par societe</p>
+            </div>
+            <div class="bg-white rounded-2xl shadow-lg p-8 mb-8">
+              <div id="dropZone" class="drop-zone border-2 border-dashed border-indigo-300 rounded-xl p-12 text-center cursor-pointer hover:border-indigo-500 transition-colors">
+                <svg class="w-16 h-16 mx-auto mb-4 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                </svg>
+                <h2 class="text-2xl font-bold text-gray-800 mb-2">Déposer les factures ici</h2>
+                <p class="text-gray-600 mb-4">ou cliquer pour sélectionner</p>
+                <input type="file" id="fileInput" multiple accept=".pdf,.jpg,.jpeg,.png,.webp,.tiff,.bmp" class="hidden">
+              </div>
+              <div id="maSocieteContainer" class="mt-6">
+                <label class="block text-sm font-medium text-gray-700 mb-2">Ma Societe:</label>
+                <input type="text" id="maSocieteInput" placeholder="Entrez le nom de votre societe" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent" value="" />
+              </div>
+            </div>
+          </div>
+        `;
+      }
+      attachEvents();
+    }
+
+    function attachEvents() {
+      const dropZone = document.getElementById('dropZone');
+      const fileInput = document.getElementById('fileInput');
+      const startBtn = document.getElementById('startBtn');
+      const clearBtn = document.getElementById('clearBtn');
+      const exportBtn = document.getElementById('exportBtn');
+      const backBtn = document.getElementById('backBtn');
+      const clearFilter = document.getElementById('clearFilter');
+      const maSocieteInput = document.getElementById('maSocieteInput');
+
+      if (dropZone) {
+        dropZone.addEventListener('click', () => fileInput?.click());
+      }
+
+      if (fileInput) {
+        fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
+      }
+
+      if (maSocieteInput) {
+        maSocieteInput.addEventListener('input', (e) => {
+          state.maSociete = e.target.value;
+          localStorage.setItem('facturescan_masociete', e.target.value);
+        });
+        maSocieteInput.value = state.maSociete;
+      }
     }
 
     function handleFiles(fileList) {
       const accepted = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'image/tiff', 'image/bmp'];
       for (const file of fileList) {
         if (!accepted.includes(file.type)) continue;
+        if (state.files.some(f => f.name === file.name && f.size === file.size)) continue;
         state.files.push({
           id: Math.random().toString(36).substr(2, 9),
           name: file.name,
           size: file.size,
           type: file.type,
-          status: 'pending'
+          status: 'pending',
+          progress: 0,
+          extractedText: '',
+          invoiceData: null,
+          file: file,
+          thumbnail: null,
+          fullPreview: null
         });
       }
       render();
     }
 
+    // ===== INIT =====
     render();
-  </script>	</body>
+  </script>
+</body>
 </html>

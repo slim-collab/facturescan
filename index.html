@@ -49,12 +49,12 @@
       filterSociete: 'all'
     };
 
-    // ===== INVOICE PARSING (V4) =====
+    // ===== INVOICE PARSING (V5 - complete rewrite) =====
     function parseInvoiceText(text, filename) {
       const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
       const fullText = text;
-      const upperText = text.toUpperCase();
 
+      // ========== UTILITY ==========
       function isValidInvoiceNumber(val) {
         if (!val || val.length < 2) return false;
         const badWords = /^(date|ation|uration|ture|ment|teur|pour|avec|dans|cette|votre|notre|avoir|total|montant|objet|paiement|reglement|euros?|prix|remise|solde|acompte|relev[e\u00e9]|r[e\u00e9]capitulatif|description|d[e\u00e9]signation|quantit[e\u00e9]|unit[e\u00e9]|libell[e\u00e9]|client|compte|adresse|code|type|mode|conditions?)$/i;
@@ -99,88 +99,193 @@
         if (m) { tvaIntra = m[1].replace(/\s/g, ''); break; }
       }
 
-      // ========== SOCIETE / FOURNISSEUR (V4) ==========
-      let societe = '';
-      const badSocieteWords = /^(facture|factures|invoice|devis|avoir|date|page|total|montant|paiement|r[e\u00e8]glement|objet|description|d[e\u00e9]signation|conditions?|euros?|eur|prix|net|ttc|ht|tva|solde|acompte|relev[e\u00e9]|r[e\u00e9]cap|client|adresse|code|iban|bic|rib|siret|siren|ape|naf|mode|type|remise|num[e\u00e9]ro|bon\s*de\s*commande|livraison|exp[e\u00e9]diteur|t[e\u00e9]l[e\u00e9]phone|t[e\u00e9]l|fax|email|e-mail|coordonn[e\u00e9]es|pi[\u00e8e]ce|document|r[e\u00e9]f[e\u00e9]rence|r[e\u00e9]f)\s*$/i;
-      const badSocieteContains = /\b(euro|EUR|\u20ac)\b/;
+      // ========== V5: FOURNISSEUR (supplier) ==========
+      // On French invoices, the supplier name is almost ALWAYS in the first few lines (header/letterhead)
+      // Legal mentions ("SARL au capital de...", "RCS...") are at the BOTTOM and should be IGNORED for supplier detection
 
-      function isBadSocieteLine(line) {
-        if (!line || line.length < 2 || line.length > 60) return true;
-        if (badSocieteWords.test(line.trim())) return true;
-        if (badSocieteContains.test(line)) return true;
-        if (/^facture\b|^invoice\b|^devis\b|^avoir\b|^page\s*\d|^n[\u00b0o]\s/i.test(line)) return true;
-        if (/@|www\.|http|\.com|\.fr/i.test(line)) return true;
-        if (/^\+?\d[\d\s\.\-]{7,}$/.test(line)) return true;
-        if (/^\d+[\s\/\-]\d+[\s\/\-]\d+/.test(line)) return true;
-        if (/^\d+\s*(rue|avenue|av\.|boulevard|blvd|bd|impasse|chemin|place|all[e\u00e9]e|route|passage|cours|voie|quai|square|r[e\u00e9]sidence|lot|zone)/i.test(line)) return true;
+      let societe = '';
+
+      // Lines that should NEVER be considered as a company name
+      function isGarbageLine(line) {
+        if (!line || line.length < 3 || line.length > 55) return true;
+        // Common document keywords
+        if (/^(facture|invoice|devis|avoir|bon\s*de|note\s*de|re[cç]u|bordereau|relev[e\u00e9]|r[e\u00e9]cap)/i.test(line)) return true;
+        // Page/date lines
+        if (/^(date|page\s*\d|le\s+\d|du\s+\d|en\s+date)/i.test(line)) return true;
+        // Pure numbers, amounts, codes
+        if (/^\d+[,\.]\d{2}\s*(\u20ac|EUR|euros?)?\s*$/i.test(line)) return true;
+        if (/^\+?\d[\d\s\.\-]{7,}$/.test(line)) return true; // phone
+        if (/^\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4}/.test(line)) return true; // dates
+        // Addresses (start with number + street type)
+        if (/^\d+[\s,]+\s*(rue|avenue|av\.|boulevard|blvd|bd|impasse|chemin|place|all[e\u00e9]e|route|passage|cours|voie|quai|square|r[e\u00e9]sidence|lot|zone)/i.test(line)) return true;
+        // Postal codes
         if (/^\d{5}\s/.test(line)) return true;
-        if (/^(euro|EUR|\d+[,\.]\d{2})/i.test(line)) return true;
-        if (/siret\s*[:\s]|siren\s*[:\s]|tva\s*[:\s]|iban\s*[:\s]|bic\s*[:\s]|rib\s*[:\s]|code\s*ape/i.test(line)) return true;
-        if (/^[A-Z]{2}\d{2}\s/.test(line)) return true;
-        if (/^(montant|total|net|solde|reste|sous.total)/i.test(line)) return true;
-        if (/^(le\s+\d|du\s+\d|en\s+date)/i.test(line)) return true;
-        if (/^(conditions|mentions?\s*l[e\u00e9]gales|capital\s*social|r\.?c\.?s\.?\s)/i.test(line)) return true;
-        if (/^\d+,\d{2}\s*$/.test(line)) return true;
+        // Email, URL
+        if (/@|www\.|http|\.com\b|\.fr\b/i.test(line)) return true;
+        // SIRET/TVA/IBAN lines
+        if (/^(siret|siren|tva|iban|bic|rib|code\s*ape|n[\u00b0o]\s*(de\s*)?tva|ape|naf)\s*[:\s]/i.test(line)) return true;
+        if (/^[A-Z]{2}\d{2}\s/.test(line)) return true; // IBAN
+        // Financial keywords
+        if (/^(montant|total|net|solde|reste|sous.total|prix|remise|acompte|r[e\u00e8]glement|paiement|conditions|modalit)/i.test(line)) return true;
+        // Legal mention lines (CRITICAL - these appear in footers)
+        if (/au\s+capital/i.test(line)) return true; // "SARL au capital de 5000"
+        if (/capital\s+social/i.test(line)) return true;
+        if (/\bR\.?C\.?S\.?\s/i.test(line)) return true; // "RCS Paris..."
+        if (/\bAPE\s*[:\/]\s*\d/i.test(line)) return true;
+        // Table headers / description lines
+        if (/\(S\)\s*:|\(P\)\s*:/i.test(line)) return true; // "(S) : Service (P) : Produit"
+        if (/^(description|d[e\u00e9]signation|libell[e\u00e9]|quantit[e\u00e9]|unit[e\u00e9]|r[e\u00e9]f[e\u00e9]rence|article)/i.test(line)) return true;
+        if (/^(objet|r[e\u00e9]f\.|n[\u00b0o]\s)/i.test(line)) return true;
+        // Service/Produit column headers
+        if (/\bService\b.*\bProduit\b|\bProduit\b.*\bService\b/i.test(line)) return true;
+        // Mentions légales keywords
+        if (/^mentions?\s*l[e\u00e9]gales/i.test(line)) return true;
+        // Lines that are just "euro", "EUR"
+        if (/^(euro|EUR|\u20ac)\b/i.test(line)) return true;
+        if (/\b(euro|EUR|\u20ac)\b/.test(line) && line.length < 10) return true;
+        // "N° client", "Code client", etc
+        if (/^(n[\u00b0o]|code|votre|notre)\s*(client|r[e\u00e9]f|commande|compte)/i.test(line)) return true;
+        // Coordonnées, telephone
+        if (/^(coordonn[e\u00e9]es|t[e\u00e9]l[e\u00e9]?\.?|fax|mobile|portable)\s*[:\s]/i.test(line)) return true;
+        // Lines with mostly digits
+        const digitCount = (line.match(/\d/g) || []).length;
+        const totalCount = line.length;
+        if (totalCount > 5 && digitCount / totalCount > 0.6) return true;
         return false;
       }
 
-      // ===== Detect CLIENT (destinataire = one of user's companies) =====
+      // Clean a supplier name candidate
+      function cleanSupplierName(name) {
+        if (!name) return '';
+        // Strip everything after common break words
+        name = name.replace(/\s+[Ff]acture\b.*$/i, ''); // "SARL DE CHAMBURE Facture Haras..."
+        name = name.replace(/\s+[Ii]nvoice\b.*$/i, '');
+        name = name.replace(/\s+[Dd]evis\b.*$/i, '');
+        name = name.replace(/\s+[Aa]voir\b.*$/i, '');
+        name = name.replace(/\s+au\s+capital\b.*$/i, ''); // "EARL XYZ au capital de..."
+        name = name.replace(/\s+capital\s+social\b.*$/i, '');
+        name = name.replace(/\s*R\.?C\.?S\.?\s.*$/i, ''); // "... RCS Paris"
+        name = name.replace(/\s*SIRET\s.*$/i, '');
+        name = name.replace(/\s*SIREN\s.*$/i, '');
+        name = name.replace(/\s*APE\s.*$/i, '');
+        name = name.replace(/\s*TVA\s.*$/i, '');
+        // Strip address fragments
+        name = name.replace(/\s*\d{1,4}\s*(rue|avenue|av\.|boulevard|blvd|bd|impasse|chemin|place|all[e\u00e9]e|route)\b.*/i, '');
+        name = name.replace(/\s*\b\d{5}\b.*$/, '');
+        // Strip email/phone
+        name = name.replace(/\s*\S+@\S+.*$/g, '');
+        name = name.replace(/\s*\+?\d[\d\s\.\-]{7,}.*$/, '');
+        name = name.replace(/\s*[Tt][e\u00e9\u00e8]l\.?\s*[:.]?\s*\+?\d.*$/, '');
+        // Strip trailing punctuation/numbers
+        name = name.replace(/\s*[,;:\-]+\s*$/, '');
+        name = name.replace(/^\s*[\-\u2013\u2014]\s*/, '');
+        // Strip "N°" prefixes
+        name = name.replace(/^n[\u00b0o]\s*\d+\s*/i, '');
+        return name.trim();
+      }
+
+      // Validate a cleaned supplier name
+      function isValidSupplier(name) {
+        if (!name || name.length < 3 || name.length > 55) return false;
+        if (isGarbageLine(name)) return false;
+        // Must contain at least some letters
+        if (!/[a-zA-Z\u00c0-\u00fc]{2}/.test(name)) return false;
+        return true;
+      }
+
+      // ===== Detect CLIENT (destinataire) FIRST =====
+      // This helps us exclude the client name from supplier candidates
       let clientDetected = '';
       const clientNames = new Set();
+
       for (let li = 0; li < lines.length; li++) {
-        const clientLabelMatch = lines[li].match(/^(?:client|destinataire|factur[e\u00e9]\s*[\u00e0a]|adress[e\u00e9]\s*(?:de\s*(?:facturation|livraison))|livr[e\u00e9]\s*[\u00e0a]|acheteur)\s*[:\-]\s*(.*)$/i);
+        const clientLabelMatch = lines[li].match(/^(?:client|destinataire|factur[e\u00e9]\s*[\u00e0a]|adress[e\u00e9]?\s*(?:de\s*)?(?:facturation|livraison)|livr[e\u00e9]\s*[\u00e0a]|acheteur|[\u00e0a]\s*l\x27attention\s*de|att[\.:]\s*|pour\s*(?:le\s*compte\s*(?:de)?)?)\s*[:\-]?\s*(.*)$/i);
         if (clientLabelMatch) {
           const sameLine = (clientLabelMatch[1] || '').trim();
-          if (sameLine.length >= 2 && sameLine.length <= 60) {
-            clientDetected = sameLine;
+          if (sameLine.length >= 3 && sameLine.length <= 60 && !/@|www\.|http/.test(sameLine)) {
+            if (!clientDetected) clientDetected = sameLine;
             clientNames.add(sameLine.toUpperCase());
           }
+          // Check next lines for the actual client name
           for (let j = li + 1; j < Math.min(li + 5, lines.length); j++) {
             const cl = lines[j];
-            if (cl.length >= 2 && cl.length <= 60 && !/\d{1,4}\s*(rue|avenue)/i.test(cl) && !/\b\d{5}\b/.test(cl)) {
+            if (!cl || cl.length < 3) continue;
+            // Stop at address lines
+            if (/^\d{1,4}\s*(rue|avenue|av\.|boulevard|blvd|bd|impasse|chemin|place|all[e\u00e9]e|route)/i.test(cl)) break;
+            if (/^\d{5}\s/.test(cl)) break;
+            if (/@|www\.|http/.test(cl)) break;
+            if (/^(siret|tva|iban|bic)/i.test(cl)) break;
+            if (cl.length <= 60) {
               if (!clientDetected) clientDetected = cl;
               clientNames.add(cl.toUpperCase());
-            } else if (/\d{1,4}\s*(rue|avenue)/i.test(cl) || /\b\d{5}\b/.test(cl)) {
-              break;
             }
           }
+          break; // Only use first client block
         }
       }
 
-      // Strategy 1: Explicit labels
+      // ===== SUPPLIER DETECTION (V5 - top-down approach) =====
+      // On French invoices, the supplier name is typically the FIRST prominent text (top of page, letterhead)
+
+      const headerLines = lines.slice(0, 15); // Only look in top portion
+
+      // Strategy 1: Explicit "Fournisseur:", "Emetteur:", "Raison sociale:" labels
       const explicitLabels = [
-        /(?:Raison\s*sociale|Soci[e\u00e9]t[e\u00e9]|Fournisseur|[\u00c9E]metteur|Vendeur|Prestataire)\s*[:\-]\s*(.{3,60})/i,
+        /(?:Raison\s*sociale|Soci[e\u00e9]t[e\u00e9]|Fournisseur|[\u00c9E]metteur|Vendeur|Prestataire|De\s*:)\s*[:\-]\s*(.{3,60})/i,
       ];
       for (const p of explicitLabels) {
-        const m = text.match(p);
+        const m = headerLines.join('\n').match(p);
         if (m) {
-          let val = m[1].trim().split('\n')[0].trim();
-          val = val.replace(/\s*\d{1,4}\s*(rue|avenue|av\.|boulevard|blvd)\b.*/i, '');
-          val = val.replace(/\s*\S+@\S+.*/g, '');
-          val = val.replace(/\s*\+?\d[\d\s\.\-]{7,}.*$/, '');
-          val = val.replace(/\b\d{5}\b.*$/, '');
-          val = val.trim();
-          if (val.length >= 2 && val.length <= 60 && !badSocieteWords.test(val) && !badSocieteContains.test(val) && !clientNames.has(val.toUpperCase())) {
+          let val = cleanSupplierName(m[1].split('\n')[0]);
+          if (isValidSupplier(val) && !clientNames.has(val.toUpperCase())) {
             societe = val;
             break;
           }
         }
       }
 
-      // Strategy 2: Legal form patterns
+      // Strategy 2: First good line in the header (most reliable for French invoices)
+      // The very first non-garbage line is almost always the company name/letterhead
       if (!societe) {
-        const legalForms = 'SARL|SAS|SASU|SA|EURL|SCI|SELARL|SELAS|SCOP|GIE|SNC|SEP';
+        for (let i = 0; i < headerLines.length; i++) {
+          const line = headerLines[i];
+          // Skip lines that are clearly garbage
+          if (isGarbageLine(line)) continue;
+          // Skip if this is a client name
+          if (clientNames.has(line.toUpperCase())) continue;
+          // Skip lines that are part of a "Client:" block
+          let isInClientBlock = false;
+          for (let j = Math.max(0, i - 1); j <= Math.min(i + 1, headerLines.length - 1); j++) {
+            if (/^(client|destinataire|factur[e\u00e9]\s*[\u00e0a]|livr[e\u00e9]\s*[\u00e0a]|acheteur)/i.test(headerLines[j])) {
+              isInClientBlock = true;
+              break;
+            }
+          }
+          if (isInClientBlock) continue;
+
+          let candidate = cleanSupplierName(line);
+          if (isValidSupplier(candidate)) {
+            societe = candidate;
+            break;
+          }
+        }
+      }
+
+      // Strategy 3: Legal form in header (SARL, SAS, etc.) - ONLY in header lines
+      if (!societe) {
+        const legalForms = 'SARL|SAS|SASU|SA|EURL|EARL|SCI|SELARL|SELAS|SCOP|GIE|SNC|SEP';
+        const headerText = headerLines.join('\n');
         const legalPatterns = [
-          new RegExp('\\b((?:[A-Z\u00c0-\u00dc][A-Z\u00c0-\u00dca-z\u00e0-\u00fc0-9\\s&\\x27\\-\\.]{1,40})\\s+(?:' + legalForms + '))\\b'),
-          new RegExp('\\b((?:' + legalForms + ')\\s+(?:[A-Z\u00c0-\u00dc][A-Z\u00c0-\u00dca-z\u00e0-\u00fc0-9\\s&\\x27\\-\\.]{1,40}))\\b'),
-          new RegExp('\\b((?:' + legalForms + ')\\s+[^\\n,;]{2,40})', 'i'),
-          new RegExp('\\b([^\\n,;]{2,40}\\s+(?:' + legalForms + '))\\b', 'i'),
+          // "SARL DE CHAMBURE" - legal form at start
+          new RegExp('\\b(' + legalForms + ')\\s+([A-Z\u00c0-\u00dc][A-Z\u00c0-\u00dca-z\u00e0-\u00fc0-9\\s&\\x27\\-\\.]{1,40})\\b'),
+          // "Menuiserie DUPONT SAS" - legal form at end
+          new RegExp('\\b([A-Z\u00c0-\u00dc][A-Z\u00c0-\u00dca-z\u00e0-\u00fc0-9\\s&\\x27\\-\\.]{1,40})\\s+(' + legalForms + ')\\b'),
         ];
         for (const p of legalPatterns) {
-          const m = text.match(p);
+          const m = headerText.match(p);
           if (m) {
-            let val = m[1].trim().replace(/\s*\S+@\S+.*/g, '').replace(/\b\d{5}\b.*$/, '').trim();
-            if (val.length >= 4 && val.length <= 60 && !badSocieteContains.test(val) && !clientNames.has(val.toUpperCase())) {
+            let val = cleanSupplierName(m[0]);
+            if (isValidSupplier(val) && !clientNames.has(val.toUpperCase())) {
               societe = val;
               break;
             }
@@ -188,80 +293,74 @@
         }
       }
 
-      // Strategy 3: Near SIRET/RCS
+      // Strategy 4: Legal form anywhere in text (fallback) - with aggressive cleanup
       if (!societe) {
-        for (let i = 0; i < lines.length; i++) {
-          if (/\b(SIRET|SIREN|R\.?C\.?S\.?)\b/i.test(lines[i])) {
-            for (let j = i - 1; j >= Math.max(0, i - 5); j--) {
-              const candidate = lines[j];
-              if (!isBadSocieteLine(candidate) && !clientNames.has(candidate.toUpperCase())) {
-                societe = candidate;
-                break;
-              }
+        const legalForms = 'SARL|SAS|SASU|SA|EURL|EARL|SCI|SELARL|SELAS|SCOP|GIE|SNC|SEP';
+        // Find lines containing a legal form
+        for (const line of lines) {
+          const legalMatch = line.match(new RegExp('\\b(' + legalForms + ')\\s+([A-Z\u00c0-\u00dc][^\\n]{1,40})', 'i'));
+          if (legalMatch) {
+            let val = cleanSupplierName(legalMatch[0]);
+            // Skip if it's in a "au capital" context
+            if (/au\s+capital/i.test(line)) continue;
+            if (isValidSupplier(val) && !clientNames.has(val.toUpperCase())) {
+              societe = val;
+              break;
             }
-            if (societe) break;
           }
-        }
-      }
-
-      // Strategy 4: Text before address
-      if (!societe) {
-        for (let i = 0; i < Math.min(lines.length, 20); i++) {
-          if (/\d{1,4}\s*(rue|avenue|av\.|boulevard|blvd|bd|impasse|chemin|place|all[e\u00e9]e|route|passage|cours|voie|quai)/i.test(lines[i]) ||
-              /\b\d{5}\b\s+[A-Z\u00c0-\u00dc]/.test(lines[i])) {
-            for (let j = i - 1; j >= Math.max(0, i - 5); j--) {
-              const candidate = lines[j];
-              if (!isBadSocieteLine(candidate) && !clientNames.has(candidate.toUpperCase())) {
-                societe = candidate;
-                break;
-              }
-            }
-            if (societe) break;
-          }
-        }
-      }
-
-      // Strategy 5: First prominent line
-      if (!societe) {
-        for (let i = 0; i < Math.min(lines.length, 12); i++) {
-          const line = lines[i];
-          if (!isBadSocieteLine(line) && !clientNames.has(line.toUpperCase())) {
-            societe = line;
-            break;
-          }
-        }
-      }
-
-      // Strategy 6: Mostly uppercase line
-      if (!societe) {
-        for (let i = 0; i < Math.min(lines.length, 15); i++) {
-          const line = lines[i];
-          if (line.length >= 3 && line.length <= 50) {
-            const upperCount = (line.match(/[A-Z\u00c0-\u00dc]/g) || []).length;
-            const letterCount = (line.match(/[a-zA-Z\u00c0-\u00fc]/g) || []).length;
-            if (letterCount > 0 && upperCount / letterCount > 0.6 && !isBadSocieteLine(line)) {
-              societe = line;
+          // Also try: name + legal form
+          const legalMatch2 = line.match(new RegExp('([A-Z\u00c0-\u00dc][^\\n]{1,40})\\s+(' + legalForms + ')\\b', 'i'));
+          if (legalMatch2) {
+            let val = cleanSupplierName(legalMatch2[0]);
+            if (/au\s+capital/i.test(line)) continue;
+            if (isValidSupplier(val) && !clientNames.has(val.toUpperCase())) {
+              societe = val;
               break;
             }
           }
         }
       }
 
-      // Cleanup societe
+      // Strategy 5: Line before an address in the header
+      if (!societe) {
+        for (let i = 0; i < headerLines.length; i++) {
+          if (/^\d{1,4}\s*(rue|avenue|av\.|boulevard|blvd|bd|impasse|chemin|place|all[e\u00e9]e|route|passage|cours|voie|quai)/i.test(headerLines[i]) ||
+              /^\d{5}\s+[A-Z\u00c0-\u00dc]/.test(headerLines[i])) {
+            for (let j = i - 1; j >= Math.max(0, i - 3); j--) {
+              let candidate = cleanSupplierName(headerLines[j]);
+              if (isValidSupplier(candidate) && !clientNames.has(candidate.toUpperCase())) {
+                societe = candidate;
+                break;
+              }
+            }
+            if (societe) break;
+          }
+        }
+      }
+
+      // Strategy 6: Line near SIRET/RCS mentions
+      if (!societe) {
+        for (let i = 0; i < lines.length; i++) {
+          if (/\b(SIRET|SIREN|R\.?C\.?S\.?)\b/i.test(lines[i])) {
+            for (let j = i - 1; j >= Math.max(0, i - 5); j--) {
+              let candidate = cleanSupplierName(lines[j]);
+              if (isValidSupplier(candidate) && !clientNames.has(candidate.toUpperCase())) {
+                societe = candidate;
+                break;
+              }
+            }
+            if (societe) break;
+          }
+        }
+      }
+
+      // Final cleanup
       if (societe) {
-        societe = societe.replace(/\s*\S+@\S+/g, '');
-        societe = societe.replace(/\d+\s*(rue|avenue|av\.|boulevard|blvd|impasse|chemin|place|all[e\u00e9]e|route)\b.*/i, '');
-        societe = societe.replace(/\b\d{5}\b.*$/, '');
-        societe = societe.replace(/^\d+\s*/, '').replace(/[,;].*$/, '').trim();
-        societe = societe.replace(/^\s*[-\u2013\u2014]\s*/, '');
-        societe = societe.replace(/\s+(euros?|eur|\u20ac)\s*$/i, '').trim();
-        societe = societe.replace(/\s*(SIRET|SIREN|R\.?C\.?S\.?).*$/i, '').trim();
-        societe = societe.replace(/\s*[Tt][e\u00e9\u00e8]l\.?\s*[:.]?\s*\+?\d.*$/, '').trim();
         if (societe.length > 50) societe = societe.substring(0, 50);
       }
-      if (!societe || societe.length < 2) societe = 'Non identifie';
+      if (!societe || societe.length < 3) societe = 'Non identifie';
 
-      console.log('[FactureScan] Fournisseur:', societe, '| Client:', clientDetected, '| First 5 lines:', lines.slice(0, 5));
+      console.log('[FactureScan V5] File:', filename, '| Fournisseur:', societe, '| Client:', clientDetected, '| Lines[0..7]:', lines.slice(0, 8));
 
       // ========== NUMERO DE FACTURE ==========
       let numero = '';
